@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
+import copy
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -73,6 +74,32 @@ def chat_template_supports_system_role(tokenizer: PreTrainedTokenizerBase) -> bo
     except Exception:
         return False
     return sentinel in rendered
+
+
+def make_generation_config_savable(model: PreTrainedModel) -> None:
+    # Transformers refuses to save a generation config that sets sampling parameters
+    # without enabling sampling (e.g. GLM 5.3 ships top_p without do_sample), which
+    # aborts saving the whole model. Such parameters show that the model's authors
+    # intended sampling, so we enable it, unless the config is invalid for other reasons.
+    generation_config = model.generation_config
+    if generation_config is None:
+        return
+    try:
+        generation_config.validate(strict=True)
+        return
+    except ValueError:
+        pass
+    repaired = copy.deepcopy(generation_config)
+    repaired.do_sample = True
+    try:
+        repaired.validate(strict=True)
+    except ValueError:
+        return
+    print(
+        "* [yellow]Enabling sampling in the generation config, which sets sampling "
+        "parameters without it[/]"
+    )
+    model.generation_config = repaired
 
 
 # The list contains one element per layer.
@@ -333,6 +360,7 @@ class Model:
             # Merge and unload
             print("* Merging LoRA adapters into base model...")
             merged_model = peft_model.merge_and_unload()
+            make_generation_config_savable(merged_model)
             return merged_model
         else:
             # Non-quantized model - can merge directly
@@ -341,6 +369,7 @@ class Model:
             # merge_and_unload() modifies self.model in-place, destroying LoRA adapters.
             # Mark for full reload if user switches trials later.
             self.needs_reload = True
+            make_generation_config_savable(merged_model)
             return merged_model
 
     def reset_model(self) -> bool:
